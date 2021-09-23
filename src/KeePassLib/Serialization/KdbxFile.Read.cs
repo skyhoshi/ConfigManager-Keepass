@@ -1,6 +1,6 @@
 /*
   KeePass Password Safe - The Open-Source Password Manager
-  Copyright (C) 2003-2018 Dominik Reichl <dominik.reichl@t-online.de>
+  Copyright (C) 2003-2021 Dominik Reichl <dominik.reichl@t-online.de>
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -89,7 +89,8 @@ namespace KeePassLib.Serialization
 			m_format = fmt;
 			m_slLogger = slLogger;
 
-			m_pbsBinaries.Clear();
+			// Other applications might not perform a deduplication
+			m_pbsBinaries = new ProtectedBinarySet(false);
 
 			UTF8Encoding encNoBom = StrUtil.Utf8;
 			byte[] pbCipherKey = null;
@@ -192,19 +193,17 @@ namespace KeePassLib.Serialization
 				}
 
 #if KeePassDebug_WriteXml
-				// FileStream fsOut = new FileStream("Raw.xml", FileMode.Create,
-				//	FileAccess.Write, FileShare.None);
-				// try
-				// {
-				//	while(true)
-				//	{
-				//		int b = sXml.ReadByte();
-				//		if(b == -1) break;
-				//		fsOut.WriteByte((byte)b);
-				//	}
-				// }
-				// catch(Exception) { }
-				// fsOut.Close();
+#warning XML output is enabled!
+				/* using(FileStream fsOut = new FileStream("Raw.xml", FileMode.Create,
+					FileAccess.Write, FileShare.None))
+				{
+					while(true)
+					{
+						int b = sXml.ReadByte();
+						if(b == -1) throw new EndOfStreamException();
+						fsOut.WriteByte((byte)b);
+					}
+				} */
 #endif
 
 				ReadXmlStreamed(sXml, sHashing);
@@ -284,11 +283,21 @@ namespace KeePassLib.Serialization
 			else throw new FormatException(KLRes.FileSigInvalid);
 
 			byte[] pb = br.ReadBytes(4);
-			uint uVersion = MemUtil.BytesToUInt32(pb);
-			if((uVersion & FileVersionCriticalMask) > (FileVersion32 & FileVersionCriticalMask))
+			uint uVer = MemUtil.BytesToUInt32(pb);
+			uint uVerMajor = uVer & FileVersionCriticalMask;
+			uint uVerMinor = uVer & ~FileVersionCriticalMask;
+			const uint uVerMaxMajor = FileVersion32 & FileVersionCriticalMask;
+			const uint uVerMaxMinor = FileVersion32 & ~FileVersionCriticalMask;
+			if(uVerMajor > uVerMaxMajor)
 				throw new FormatException(KLRes.FileVersionUnsupported +
 					MessageService.NewParagraph + KLRes.FileNewVerReq);
-			m_uFileVersion = uVersion;
+			if((uVerMajor == uVerMaxMajor) && (uVerMinor > uVerMaxMinor) &&
+				(g_fConfirmOpenUnkVer != null))
+			{
+				if(!g_fConfirmOpenUnkVer())
+					throw new OperationCanceledException();
+			}
+			m_uFileVersion = uVer;
 
 			while(true)
 			{
@@ -401,7 +410,7 @@ namespace KeePassLib.Serialization
 				default:
 					Debug.Assert(false);
 					if(m_slLogger != null)
-						m_slLogger.SetText(KLRes.UnknownHeaderId + @": " +
+						m_slLogger.SetText(KLRes.UnknownHeaderId + ": " +
 							kdbID.ToString() + "!", LogStatusType.Warning);
 					break;
 			}
@@ -458,6 +467,7 @@ namespace KeePassLib.Serialization
 
 					ProtectedBinary pb = new ProtectedBinary(bProt, pbData,
 						1, pbData.Length - 1);
+					Debug.Assert(m_pbsBinaries.Find(pb) < 0); // No deduplication?
 					m_pbsBinaries.Add(pb);
 
 					if(bProt) MemUtil.ZeroByteArray(pbData);
@@ -497,6 +507,29 @@ namespace KeePassLib.Serialization
 			m_craInnerRandomStream = (CrsAlgorithm)uID;
 		}
 
+		internal static PwGroup ReadGroup(Stream msData, PwDatabase pdContext,
+			bool bCopyIcons, bool bNewUuids, bool bSetCreatedNow)
+		{
+			PwDatabase pd = new PwDatabase();
+			pd.New(new IOConnectionInfo(), new CompositeKey());
+
+			KdbxFile f = new KdbxFile(pd);
+			f.Load(msData, KdbxFormat.PlainXml, null);
+
+			if(bCopyIcons)
+				PwDatabase.CopyCustomIcons(pd, pdContext, pd.RootGroup, true);
+
+			if(bNewUuids)
+			{
+				pd.RootGroup.Uuid = new PwUuid(true);
+				pd.RootGroup.CreateNewItemUuids(true, true, true);
+			}
+
+			if(bSetCreatedNow) pd.RootGroup.SetCreatedNow(true);
+
+			return pd.RootGroup;
+		}
+
 		[Obsolete]
 		public static List<PwEntry> ReadEntries(Stream msData)
 		{
@@ -509,82 +542,13 @@ namespace KeePassLib.Serialization
 			return ReadEntries(msData, pdContext, true);
 		}
 
-		/// <summary>
-		/// Read entries from a stream.
-		/// </summary>
-		/// <param name="msData">Input stream to read the entries from.</param>
-		/// <param name="pdContext">Context database (e.g. for storing icons).</param>
-		/// <param name="bCopyIcons">If <c>true</c>, custom icons required by
-		/// the loaded entries are copied to the context database.</param>
-		/// <returns>Loaded entries.</returns>
 		public static List<PwEntry> ReadEntries(Stream msData, PwDatabase pdContext,
 			bool bCopyIcons)
 		{
-			List<PwEntry> lEntries = new List<PwEntry>();
+			if(msData == null) { Debug.Assert(false); return new List<PwEntry>(); }
 
-			if(msData == null) { Debug.Assert(false); return lEntries; }
-			// pdContext may be null
-
-			/* KdbxFile f = new KdbxFile(pwDatabase);
-			f.m_format = KdbxFormat.PlainXml;
-
-			XmlDocument doc = XmlUtilEx.CreateXmlDocument();
-			doc.Load(msData);
-
-			XmlElement el = doc.DocumentElement;
-			if(el.Name != ElemRoot) throw new FormatException();
-
-			List<PwEntry> vEntries = new List<PwEntry>();
-
-			foreach(XmlNode xmlChild in el.ChildNodes)
-			{
-				if(xmlChild.Name == ElemEntry)
-				{
-					PwEntry pe = f.ReadEntry(xmlChild);
-					pe.Uuid = new PwUuid(true);
-
-					foreach(PwEntry peHistory in pe.History)
-						peHistory.Uuid = pe.Uuid;
-
-					vEntries.Add(pe);
-				}
-				else { Debug.Assert(false); }
-			}
-
-			return vEntries; */
-
-			PwDatabase pd = new PwDatabase();
-			pd.New(new IOConnectionInfo(), new CompositeKey());
-
-			KdbxFile f = new KdbxFile(pd);
-			f.Load(msData, KdbxFormat.PlainXml, null);
-
-			foreach(PwEntry pe in pd.RootGroup.Entries)
-			{
-				pe.SetUuid(new PwUuid(true), true);
-				lEntries.Add(pe);
-
-				if(bCopyIcons && (pdContext != null))
-				{
-					PwUuid pu = pe.CustomIconUuid;
-					if(!pu.Equals(PwUuid.Zero))
-					{
-						int iSrc = pd.GetCustomIconIndex(pu);
-						int iDst = pdContext.GetCustomIconIndex(pu);
-
-						if(iSrc < 0) { Debug.Assert(false); }
-						else if(iDst < 0)
-						{
-							pdContext.CustomIcons.Add(pd.CustomIcons[iSrc]);
-
-							pdContext.Modified = true;
-							pdContext.UINeedsIconUpdate = true;
-						}
-					}
-				}
-			}
-
-			return lEntries;
+			PwGroup pg = ReadGroup(msData, pdContext, bCopyIcons, true, true);
+			return pg.GetEntries(true).CloneShallowToList();
 		}
 	}
 }

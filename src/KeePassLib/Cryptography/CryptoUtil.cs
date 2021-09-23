@@ -1,6 +1,6 @@
 ﻿/*
   KeePass Password Safe - The Open-Source Password Manager
-  Copyright (C) 2003-2018 Dominik Reichl <dominik.reichl@t-online.de>
+  Copyright (C) 2003-2021 Dominik Reichl <dominik.reichl@t-online.de>
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Text;
 
@@ -104,6 +105,22 @@ namespace KeePassLib.Cryptography
 			return pbHash;
 		}
 
+		internal static byte[] HashSha256(string strFilePath)
+		{
+			byte[] pbHash = null;
+
+			using(FileStream fs = new FileStream(strFilePath, FileMode.Open,
+				FileAccess.Read, FileShare.Read))
+			{
+				using(SHA256Managed h = new SHA256Managed())
+				{
+					pbHash = h.ComputeHash(fs);
+				}
+			}
+
+			return pbHash;
+		}
+
 		/// <summary>
 		/// Create a cryptographic key of length <paramref name="cbOut" />
 		/// (in bytes) from <paramref name="pbIn" />.
@@ -164,6 +181,7 @@ namespace KeePassLib.Cryptography
 			return pbRet;
 		}
 
+#if !KeePassUAP
 		private static bool? g_obAesCsp = null;
 		internal static SymmetricAlgorithm CreateAes()
 		{
@@ -198,6 +216,7 @@ namespace KeePassLib.Cryptography
 
 			return null;
 		}
+#endif
 
 		public static byte[] ProtectData(byte[] pb, byte[] pbOptEntropy,
 			DataProtectionScope s)

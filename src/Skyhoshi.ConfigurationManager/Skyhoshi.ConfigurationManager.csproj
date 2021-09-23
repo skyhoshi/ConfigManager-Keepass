@@ -59,6 +59,12 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ConfigurationManager.cs" />
+    <Compile Include="Database\DatabaseInformation.cs" />
+    <Compile Include="Database\Search\SearchInformation.cs" />
+    <Compile Include="Database\Search\SearchProcessor.cs" />
+    <Compile Include="InternalCrypto\Crypto.cs" />
+    <Compile Include="InternalCrypto\CryptoInformation.cs" />
+    <Compile Include="Logging\DebugStatusLogger.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
@@ -70,5 +76,6 @@
       <Name>KeePassLib</Name>
     </ProjectReference>
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

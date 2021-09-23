@@ -1,6 +1,6 @@
 /*
   KeePass Password Safe - The Open-Source Password Manager
-  Copyright (C) 2003-2018 Dominik Reichl <dominik.reichl@t-online.de>
+  Copyright (C) 2003-2021 Dominik Reichl <dominik.reichl@t-online.de>
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -86,8 +86,11 @@ namespace KeePassLib.Serialization
 		private PwDeletedObject m_ctxDeletedObject = null;
 		private PwUuid m_uuidCustomIconID = PwUuid.Zero;
 		private byte[] m_pbCustomIconData = null;
+		private string m_strCustomIconName = null;
+		private DateTime? m_odtCustomIconLastMod = null;
 		private string m_strCustomDataKey = null;
 		private string m_strCustomDataValue = null;
+		private DateTime? m_odtCustomDataLastMod = null;
 		private string m_strGroupCustomDataKey = null;
 		private string m_strGroupCustomDataValue = null;
 		private string m_strEntryCustomDataKey = null;
@@ -151,7 +154,7 @@ namespace KeePassLib.Serialization
 				}
 
 				++uTagCounter;
-				if(((uTagCounter % 256) == 0) && bSupportsStatus)
+				if(((uTagCounter & 0xFFU) == 0) && bSupportsStatus)
 				{
 					Debug.Assert(lStreamLength == sParentStream.Length);
 					uint uPct = (uint)((sParentStream.Position * 100) /
@@ -161,7 +164,8 @@ namespace KeePassLib.Serialization
 					// position/length values (M120413)
 					if(uPct > 100) { Debug.Assert(false); uPct = 100; }
 
-					m_slLogger.SetProgress(uPct);
+					if(!m_slLogger.SetProgress(uPct))
+						throw new OperationCanceledException();
 				}
 			}
 
@@ -305,6 +309,10 @@ namespace KeePassLib.Serialization
 							m_pbCustomIconData = Convert.FromBase64String(strData);
 						else { Debug.Assert(false); }
 					}
+					else if(xr.Name == ElemName)
+						m_strCustomIconName = ReadString(xr);
+					else if(xr.Name == ElemLastModTime)
+						m_odtCustomIconLastMod = ReadTime(xr);
 					else ReadUnknown(xr);
 					break;
 
@@ -341,6 +349,8 @@ namespace KeePassLib.Serialization
 						m_strCustomDataKey = ReadString(xr);
 					else if(xr.Name == ElemValue)
 						m_strCustomDataValue = ReadString(xr);
+					else if(xr.Name == ElemLastModTime)
+						m_odtCustomDataLastMod = ReadTime(xr);
 					else ReadUnknown(xr);
 					break;
 
@@ -384,6 +394,10 @@ namespace KeePassLib.Serialization
 						m_ctxGroup.EnableSearching = StrUtil.StringToBoolEx(ReadString(xr));
 					else if(xr.Name == ElemLastTopVisibleEntry)
 						m_ctxGroup.LastTopVisibleEntry = ReadUuid(xr);
+					else if(xr.Name == ElemPreviousParentGroup)
+						m_ctxGroup.PreviousParentGroup = ReadUuid(xr);
+					else if(xr.Name == ElemTags)
+						m_ctxGroup.Tags = StrUtil.StringToTags(ReadString(xr));
 					else if(xr.Name == ElemCustomData)
 						return SwitchContext(ctx, KdbContext.GroupCustomData, xr);
 					else if(xr.Name == ElemGroup)
@@ -441,8 +455,12 @@ namespace KeePassLib.Serialization
 					}
 					else if(xr.Name == ElemOverrideUrl)
 						m_ctxEntry.OverrideUrl = ReadString(xr);
+					else if(xr.Name == ElemQualityCheck)
+						m_ctxEntry.QualityCheck = ReadBool(xr, true);
 					else if(xr.Name == ElemTags)
 						m_ctxEntry.Tags = StrUtil.StringToTags(ReadString(xr));
+					else if(xr.Name == ElemPreviousParentGroup)
+						m_ctxEntry.PreviousParentGroup = ReadUuid(xr);
 					else if(xr.Name == ElemTimes)
 						return SwitchContext(ctx, KdbContext.EntryTimes, xr);
 					else if(xr.Name == ElemString)
@@ -598,12 +616,19 @@ namespace KeePassLib.Serialization
 			{
 				if(!m_uuidCustomIconID.Equals(PwUuid.Zero) &&
 					(m_pbCustomIconData != null))
-					m_pwDatabase.CustomIcons.Add(new PwCustomIcon(
-						m_uuidCustomIconID, m_pbCustomIconData));
+				{
+					PwCustomIcon ci = new PwCustomIcon(m_uuidCustomIconID,
+						m_pbCustomIconData);
+					if(m_strCustomIconName != null) ci.Name = m_strCustomIconName;
+					ci.LastModificationTime = m_odtCustomIconLastMod;
+					m_pwDatabase.CustomIcons.Add(ci);
+				}
 				else { Debug.Assert(false); }
 
 				m_uuidCustomIconID = PwUuid.Zero;
 				m_pbCustomIconData = null;
+				m_strCustomIconName = null;
+				m_odtCustomIconLastMod = null;
 
 				return KdbContext.CustomIcons;
 			}
@@ -614,11 +639,13 @@ namespace KeePassLib.Serialization
 			else if((ctx == KdbContext.CustomDataItem) && (xr.Name == ElemStringDictExItem))
 			{
 				if((m_strCustomDataKey != null) && (m_strCustomDataValue != null))
-					m_pwDatabase.CustomData.Set(m_strCustomDataKey, m_strCustomDataValue);
+					m_pwDatabase.CustomData.Set(m_strCustomDataKey,
+						m_strCustomDataValue, m_odtCustomDataLastMod);
 				else { Debug.Assert(false); }
 
 				m_strCustomDataKey = null;
 				m_strCustomDataValue = null;
+				m_odtCustomDataLastMod = null;
 
 				return KdbContext.CustomData;
 			}
@@ -742,9 +769,15 @@ namespace KeePassLib.Serialization
 			XorredBuffer xb = ProcessNode(xr);
 			if(xb != null)
 			{
-				byte[] pb = xb.ReadPlainText();
-				if(pb.Length == 0) return string.Empty;
-				return StrUtil.Utf8.GetString(pb, 0, pb.Length);
+				Debug.Assert(false); // Protected data is unexpected here
+				try
+				{
+					byte[] pb = xb.ReadPlainText();
+					if(pb.Length == 0) return string.Empty;
+					try { return StrUtil.Utf8.GetString(pb, 0, pb.Length); }
+					finally { MemUtil.ZeroByteArray(pb); }
+				}
+				finally { xb.Dispose(); }
 			}
 
 			m_bReadNextNode = false; // ReadElementString skips end tag
@@ -922,7 +955,11 @@ namespace KeePassLib.Serialization
 		private ProtectedString ReadProtectedString(XmlReader xr)
 		{
 			XorredBuffer xb = ProcessNode(xr);
-			if(xb != null) return new ProtectedString(true, xb);
+			if(xb != null)
+			{
+				try { return new ProtectedString(true, xb); }
+				finally { xb.Dispose(); }
+			}
 
 			bool bProtect = false;
 			if(m_format == KdbxFormat.PlainXml)
@@ -934,8 +971,7 @@ namespace KeePassLib.Serialization
 				}
 			}
 
-			ProtectedString ps = new ProtectedString(bProtect, ReadString(xr));
-			return ps;
+			return new ProtectedString(bProtect, ReadString(xr));
 		}
 
 		private ProtectedBinary ReadProtectedBinary(XmlReader xr)
@@ -977,7 +1013,8 @@ namespace KeePassLib.Serialization
 			if(xb != null)
 			{
 				Debug.Assert(!bCompressed); // See SubWriteValue(ProtectedBinary value)
-				return new ProtectedBinary(true, xb);
+				try { return new ProtectedBinary(true, xb); }
+				finally { xb.Dispose(); }
 			}
 
 			byte[] pbData = ReadBase64(xr, true);
@@ -990,28 +1027,37 @@ namespace KeePassLib.Serialization
 		private void ReadUnknown(XmlReader xr)
 		{
 			Debug.Assert(false); // Unknown node!
+			Debug.Assert(xr.NodeType == XmlNodeType.Element);
 
-			if(xr.IsEmptyElement) return;
+			bool bRead = false;
+			int cOpen = 0;
 
-			string strUnknownName = xr.Name;
-			ProcessNode(xr);
-
-			while(xr.Read())
+			do
 			{
-				if(xr.NodeType == XmlNodeType.EndElement) break;
-				if(xr.NodeType != XmlNodeType.Element) continue;
+				if(bRead) xr.Read();
+				bRead = true;
 
-				ReadUnknown(xr);
+				if(xr.NodeType == XmlNodeType.EndElement) --cOpen;
+				else if(xr.NodeType == XmlNodeType.Element)
+				{
+					if(!xr.IsEmptyElement)
+					{
+						XorredBuffer xb = ProcessNode(xr);
+						if(xb != null) { xb.Dispose(); bRead = m_bReadNextNode; continue; }
+
+						++cOpen;
+					}
+				}
 			}
+			while(cOpen > 0);
 
-			Debug.Assert(xr.Name == strUnknownName);
+			m_bReadNextNode = bRead;
 		}
 
 		private XorredBuffer ProcessNode(XmlReader xr)
 		{
 			// Debug.Assert(xr.NodeType == XmlNodeType.Element);
 
-			XorredBuffer xb = null;
 			if(xr.HasAttributes)
 			{
 				if(xr.MoveToAttribute(AttrProtected))
@@ -1020,15 +1066,15 @@ namespace KeePassLib.Serialization
 					{
 						xr.MoveToElement();
 
-						byte[] pbEncrypted = ReadBase64(xr, true);
-						byte[] pbPad = m_randomStream.GetRandomBytes((uint)pbEncrypted.Length);
+						byte[] pbCT = ReadBase64(xr, true);
+						byte[] pbPad = m_randomStream.GetRandomBytes((uint)pbCT.Length);
 
-						xb = new XorredBuffer(pbEncrypted, pbPad);
+						return new XorredBuffer(pbCT, pbPad);
 					}
 				}
 			}
 
-			return xb;
+			return null;
 		}
 
 		private static KdbContext SwitchContext(KdbContext ctxCurrent,
